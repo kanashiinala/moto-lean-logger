@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101820">
+<title>MOTO LEAN LOGGER</title>
+<style>
+:root{color-scheme:dark;--bg:#101820;--panel:#1b2833;--muted:#aab8c4;--accent:#56b4e9;--line:#334451}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#f4f7f9;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:720px;margin:auto;padding:20px 16px 40px}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:18px}
+h1{font-size:19px;letter-spacing:.08em;margin:0} .tag{font-size:11px;color:#b8dff4;border:1px solid #35627a;padding:5px 8px;border-radius:20px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:16px;margin:12px 0}
+.small{color:var(--muted);font-size:12px;line-height:1.6}.label{color:var(--muted);font-size:12px}
+.big{font-size:48px;font-weight:700;letter-spacing:-2px;font-variant-numeric:tabular-nums;margin:4px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.metric{background:#111c25;border-radius:12px;padding:13px}.metric strong{display:block;font-size:26px;margin-top:5px;font-variant-numeric:tabular-nums}
+button,select{font:inherit;border-radius:11px;border:1px solid var(--line);padding:13px;background:#263846;color:white}
+button{cursor:pointer;font-weight:650}button.primary{background:#1676a8;border-color:#1676a8}button:disabled{opacity:.38;cursor:not-allowed}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:9px}.actions button{width:100%}
+select{width:100%;margin-top:7px}
+.status{display:flex;align-items:center;gap:8px;font-size:13px}.dot{width:9px;height:9px;border-radius:50%;background:#77838c}.dot.on{background:#42c98a;box-shadow:0 0 10px #42c98a}
+.notice{border-left:3px solid #d7a64b;padding:9px 11px;background:#2b2a23;border-radius:5px;color:#f0dfb9;font-size:12px;line-height:1.6}
+canvas{width:100%;height:150px;background:#111c25;border-radius:10px}
+footer{color:#7f909d;font-size:11px;line-height:1.6;margin-top:18px}
+</style>
+</head>
+<body>
+<main>
+<header><h1>MOTO LEAN LOGGER</h1><span class="tag">PROTOTYPE 0.1</span></header>
+<div class="panel">
+ <div class="status"><span id="dot" class="dot"></span><span id="status">センサー未接続</span></div>
+ <div class="label" style="margin-top:18px">現在の傾斜角（校正後・参考値）</div>
+ <div class="big" id="current">--.-°</div>
+ <div class="small" id="sensorline">センサーの許可後に値が表示されます。</div>
+</div>
+<div class="grid">
+ <div class="metric"><div class="label">左方向 最大値</div><strong id="left">--.-°</strong></div>
+ <div class="metric"><div class="label">右方向 最大値</div><strong id="right">--.-°</strong></div>
+ <div class="metric"><div class="label">記録時間</div><strong id="duration">00:00</strong></div>
+ <div class="metric"><div class="label">記録サンプル</div><strong id="samples">0</strong></div>
+</div>
+<div class="panel">
+ <div style="font-weight:650;margin-bottom:8px">センサー設定</div>
+ <label class="label" for="axis">左右傾斜として使う軸</label>
+ <select id="axis"><option value="gamma">gamma（初期設定）</option><option value="beta">beta（取り付け方向に応じて変更）</option></select>
+ <p class="small">スマホをタンク上面に固定し、車体を直立させた状態で「ゼロ点校正」を行ってください。取り付け方向によりgamma/betaのどちらが適切か変わります。</p>
+ <div class="actions">
+  <button id="permission" class="primary">センサーを許可</button>
+  <button id="calibrate" disabled>ゼロ点校正</button>
+  <button id="start" class="primary" disabled>記録開始</button>
+  <button id="stop" disabled>記録終了</button>
+ </div>
+</div>
+<div class="panel">
+ <div style="font-weight:650;margin-bottom:10px">傾斜角の推移</div>
+ <canvas id="chart" width="640" height="300"></canvas>
+ <p class="small">グラフは直近の記録値を表示します。</p>
+ <button id="export" disabled style="width:100%">CSVを書き出す</button>
+</div>
+<div class="notice">重要：これはセンサー動作確認用の試作品です。表示角度は車体の正確なリーン角を保証しません。走行中は画面を見ず、計測は安全な場所・条件で行ってください。スマホは確実に固定し、端末の脱落や振動にも注意してください。</div>
+<footer>初期版では端末のDeviceOrientation値を記録します。走行中の加速度・スマホの取付角度・車体との相対運動の影響を受けます。実車での検証前に、表示値を運転技術や安全判断に使用しないでください。</footer>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let sensorReady=false, zero=null, recording=false, startedAt=0, samples=[], lastValue=null, maxLeft=0, maxRight=0, wakeLock=null, chartValues=[];
+function setStatus(t,on=false){$('status').textContent=t;$('dot').className=on?'dot on':'dot'}
+function fmt(s){let m=Math.floor(s/60),r=Math.floor(s%60);return String(m).padStart(2,'0')+':'+String(r).padStart(2,'0')}
+function axisValue(e){return $('axis').value==='gamma'?e.gamma:e.beta}
+function update(e){
+ const raw=axisValue(e);
+ if(raw===null||raw===undefined||!Number.isFinite(raw))return;
+ lastValue=raw;
+ if(zero===null){$('sensorline').textContent='センサー値を取得中。車体を直立させて校正してください。';return}
+ const v=raw-zero;
+ $('current').textContent=(v>=0?'+':'')+v.toFixed(1)+'°';
+ $('sensorline').textContent=`alpha ${Number(e.alpha||0).toFixed(1)}° / beta ${Number(e.beta||0).toFixed(1)}° / gamma ${Number(e.gamma||0).toFixed(1)}°`;
+ if(recording){
+  const t=performance.now()-startedAt;
+  samples.push({elapsed_ms:Math.round(t),timestamp:new Date().toISOString(),angle_deg:v,alpha:e.alpha,beta:e.beta,gamma:e.gamma});
+  if(v<0)maxLeft=Math.max(maxLeft,Math.abs(v)); else maxRight=Math.max(maxRight,v);
+  chartValues.push(v); if(chartValues.length>180)chartValues.shift();
+  $('left').textContent=maxLeft.toFixed(1)+'°';$('right').textContent=maxRight.toFixed(1)+'°';
+  $('duration').textContent=fmt(t/1000);$('samples').textContent=samples.length;
+  draw();
+ }
+}
+function draw(){
+ const c=$('chart'),ctx=c.getContext('2d'),w=c.width,h=c.height;
+ ctx.clearRect(0,0,w,h);ctx.strokeStyle='#344754';ctx.lineWidth=1;
+ for(let i=0;i<5;i++){let y=20+i*(h-40)/4;ctx.beginPath();ctx.moveTo(35,y);ctx.lineTo(w-10,y);ctx.stroke()}
+ const mid=h/2;ctx.strokeStyle='#71818c';ctx.beginPath();ctx.moveTo(35,mid);ctx.lineTo(w-10,mid);ctx.stroke();
+ if(chartValues.length<2)return;
+ ctx.strokeStyle='#56b4e9';ctx.lineWidth=3;ctx.beginPath();
+ chartValues.forEach((v,i)=>{let x=35+i*(w-50)/(Math.max(1,chartValues.length-1));let y=mid-v*3.2;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y)});ctx.stroke();
+}
+async function requestSensors(){
+ try{
+  if(typeof DeviceOrientationEvent==='undefined')throw new Error('このブラウザでは姿勢センサーを利用できません。');
+  if(typeof DeviceOrientationEvent.requestPermission==='function'){
+   const p=await DeviceOrientationEvent.requestPermission();
+   if(p!=='granted')throw new Error('センサー利用が許可されませんでした。');
+  }
+  window.addEventListener('deviceorientation',update,true);
+  sensorReady=true;$('calibrate').disabled=false;$('start').disabled=false;
+  setStatus('センサー接続済み',true);
+ }catch(err){setStatus(err.message||'センサーを開始できません');}
+}
+$('permission').addEventListener('click',requestSensors);
+$('calibrate').addEventListener('click',()=>{
+ if(lastValue===null){alert('先にセンサーを許可してください。値が取得できてから校正できます。');return}
+ zero=lastValue;$('current').textContent='0.0°';setStatus('ゼロ点校正済み',true);
+});
+$('axis').addEventListener('change',()=>{zero=null;$('current').textContent='--.-°';setStatus('軸を変更しました。もう一度校正してください。',sensorReady)});
+$('start').addEventListener('click',async()=>{
+ if(!sensorReady||zero===null){alert('先にセンサー許可とゼロ点校正を行ってください。');return}
+ samples=[];chartValues=[];maxLeft=0;maxRight=0;startedAt=performance.now();recording=true;
+ $('left').textContent='0.0°';$('right').textContent='0.0°';$('duration').textContent='00:00';$('samples').textContent='0';
+ $('start').disabled=true;$('stop').disabled=false;$('export').disabled=true;setStatus('記録中 — 画面を開いたままにしてください',true);
+ try{if('wakeLock' in navigator)wakeLock=await navigator.wakeLock.request('screen')}catch(e){}
+});
+$('stop').addEventListener('click',()=>{
+ if(!recording)return;recording=false;$('start').disabled=false;$('stop').disabled=true;$('export').disabled=samples.length===0;
+ if(wakeLock){wakeLock.release();wakeLock=null}
+ setStatus('記録終了：'+samples.length+'サンプルを取得',true);
+});
+$('export').addEventListener('click',()=>{
+ if(!samples.length)return;
+ const header=['elapsed_ms','timestamp','estimated_angle_deg','alpha_deg','beta_deg','gamma_deg'];
+ const rows=samples.map(s=>[s.elapsed_ms,s.timestamp,s.angle_deg,s.alpha,s.beta,s.gamma].join(','));
+ const blob=new Blob(['\uFEFF'+header.join(',')+'\n'+rows.join('\n')],{type:'text/csv;charset=utf-8'});
+ const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='moto_lean_'+new Date().toISOString().replace(/[:.]/g,'-')+'.csv';a.click();URL.revokeObjectURL(url);
+});
+draw();
+</script>
+</body></html>
